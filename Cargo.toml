@@ -1,0 +1,15 @@
+[package]
+name = "gc-image"
+version = "0.1.0"
+authors = ["Melanie Schulte <schulteamelanie@gmail.com>"]
+edition = "2018"
+description = "A library for parsing metadata from Nintendo GameCube image files."
+publish = false
+license = "MIT"
+license-file = "./LICENSE"
+readme = "./README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+encoding_rs = "0.8.24"
