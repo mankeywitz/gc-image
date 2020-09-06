@@ -21,22 +21,22 @@ pub enum Region {
 }
 
 impl Region {
-    fn from_byte(byte: u8) -> Region {
+    fn from_byte(byte: u8) -> Result<Region, &'static str> {
         match byte {
             b'E' => {
-                Region::USA
+                Ok(Region::USA)
             },
             b'J' => {
-                Region::JPN
+                Ok(Region::JPN)
             },
             b'P' => {
-                Region::EUR
+                Ok(Region::EUR)
             },
             b'F' => {
-                Region::FRA
+                Ok(Region::FRA)
             },
             _ => {
-                panic!("Unknown region code {}!", byte);
+                Err("invalid region code")
             }
         }
     }
@@ -99,27 +99,32 @@ struct Entry {
 }
 
 impl GCImage {
-    pub fn open(path: &Path) -> GCImage {
+    pub fn open(path: &Path) -> Result<GCImage, &'static str> {
         let metadata = fs::metadata(path).unwrap();
         if metadata.len() != DVD_IMAGE_SIZE {
-            panic!("Invalid image size!");
+            return Err("invalid image size");
         }
         let mut file = fs::File::open(path).unwrap();
         file.seek(std::io::SeekFrom::Start(0)).unwrap();
+
+        //Read and parse DVD Image header
         let mut data: [u8; DVD_HEADER_SIZE] = [0; DVD_HEADER_SIZE];
         file.read(&mut data).unwrap();
         let header = parse_header(&data);
-        validate_header(&header);
-        let region = Region::from_byte(header.game_code[3]);
+        validate_header(&header)?;
+
+        let region = Region::from_byte(header.game_code[3])?;
+
+        //Read and parse banner file. TODO, don't spam list files here. Maybe return an Iterator to each file entry?
         let root_entry = read_root_entry(&mut file, header.fst_ofst);
         list_files(&mut file, header.fst_ofst, &root_entry);
-        let banner = read_banner(&mut file, header.fst_ofst, &root_entry, region);
-        validate_banner(&banner);
-        GCImage {
+        let banner = read_banner(&mut file, header.fst_ofst, &root_entry, region)?;
+        validate_banner(&banner)?;
+        Ok(GCImage {
             header,
             banner,
             region
-        }
+        })
     }
 }
 
@@ -157,12 +162,14 @@ fn parse_header(data: &[u8]) -> DVDHeader {
     }
 }
 
-fn read_banner(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, region: Region) -> Banner {
+fn read_banner(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, region: Region) -> Result<Banner, &'static str> {
     let banner_entry = find_file(file, fst_ofst, root_entry, BANNER_NAME).unwrap();
     match banner_entry.entry {
         EntryType::File(file_data) => {
             let mut data = [0; BANNER_SZ];
-            assert!(file_data.file_length as usize == BANNER_SZ);
+            if file_data.file_length as usize != BANNER_SZ {
+                return Err("malformed banner file")
+            }
             file.seek(std::io::SeekFrom::Start(file_data.file_offset as u64)).unwrap();
             file.read(&mut data).unwrap();
 
@@ -175,7 +182,7 @@ fn read_banner(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, r
             let full_game_title = byte_slice_to_string(&data[0x1860..0x18a0], region);
             let full_developer_name = byte_slice_to_string(&data[0x18a0..0x18e0], region) ;
             let description = byte_slice_to_string(&data[0x18e0..0x1960], region);
-            Banner {
+            Ok(Banner {
                 magic_word,
                 graphical_data,
                 game_name,
@@ -183,10 +190,10 @@ fn read_banner(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, r
                 full_game_title,
                 full_developer_name,
                 description
-            }
+            })
         },
         _ => {
-            panic!("Expected a file entry!");
+            Err("no opening.bnr found")
         }
     }
 }
@@ -305,18 +312,31 @@ fn byte_slice_to_string(bytes: &[u8], region: Region) -> String {
     }
 }
 
-fn validate_header(hdr: &DVDHeader) {
-    assert!(hdr.magic_word == DVD_MAGIC_NUMBER);
-    assert!((hdr.fst_ofst as u64) < DVD_IMAGE_SIZE);
-    assert!((hdr.dol_ofst as u64) < DVD_IMAGE_SIZE);
-    assert!(hdr.game_code[0] == CONSOLE_ID);
+fn validate_header(hdr: &DVDHeader) -> Result<(), &'static str> {
+    if hdr.magic_word != DVD_MAGIC_NUMBER {
+        return Err("incorrect or missing magic number");
+    }
+    if (hdr.fst_ofst as u64) >= DVD_IMAGE_SIZE {
+        return Err("malformed filesystem table offset");
+    }
+    if (hdr.dol_ofst as u64) >= DVD_IMAGE_SIZE {
+        return Err("malformed bootfile offset");
+    }
+    if hdr.game_code[0] != CONSOLE_ID {
+        return Err("incorrect console id");
+    }
+    Ok(())
 }
 
-fn validate_banner(bnr: &Banner) {
-    assert!(bnr.magic_word[0] == b'B');
-    assert!(bnr.magic_word[1] == b'N');
-    assert!(bnr.magic_word[2] == b'R');
-    assert!(bnr.magic_word[3] == b'1' || bnr.magic_word[3] == b'2');
+fn validate_banner(bnr: &Banner) -> Result<(), &'static str> {
+    if bnr.magic_word[0] != b'B' ||
+       bnr.magic_word[1] != b'N' ||
+       bnr.magic_word[2] != b'R' ||
+       ( bnr.magic_word[3] != b'1' && bnr.magic_word[3] != b'2' ) {
+        Err("invalid banner magic word")
+    } else {
+        Ok(())
+    }
 }
 
 fn u8_arr_to_u32(arr: &[u8]) -> u32 {
