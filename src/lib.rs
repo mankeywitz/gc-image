@@ -109,7 +109,7 @@ impl GCImage {
 
         //Read and parse DVD Image header
         let mut data: [u8; DVD_HEADER_SIZE] = [0; DVD_HEADER_SIZE];
-        file.read(&mut data).unwrap();
+        file.read_exact(&mut data).unwrap();
         let header = parse_header(&data);
         validate_header(&header)?;
 
@@ -171,7 +171,7 @@ fn read_banner(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, r
                 return Err("malformed banner file")
             }
             file.seek(std::io::SeekFrom::Start(file_data.file_offset as u64)).unwrap();
-            file.read(&mut data).unwrap();
+            file.read_exact(&mut data).unwrap();
 
             let mut magic_word = [0; 0x4];
             magic_word.copy_from_slice(&data[0..0x4]);
@@ -201,7 +201,7 @@ fn read_banner(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, r
 fn read_root_entry(file: &mut fs::File, fst_ofst: u32) -> RootDirectory {
     file.seek(std::io::SeekFrom::Start(fst_ofst as u64)).unwrap();
     let mut data = [0; FILE_ENTRY_SIZE];
-    file.read(&mut data).unwrap();
+    file.read_exact(&mut data).unwrap();
 
     let flags = data[0];
     assert!(flags == 1); //Root Entry Should always be a directory
@@ -217,7 +217,7 @@ fn read_root_entry(file: &mut fs::File, fst_ofst: u32) -> RootDirectory {
 fn read_entry(file: &mut fs::File, ofst: u32) -> Entry {
     file.seek(std::io::SeekFrom::Start(ofst as u64)).unwrap();
     let mut data = [0; FILE_ENTRY_SIZE];
-    file.read(&mut data).unwrap();
+    file.read_exact(&mut data).unwrap();
 
     let flags = data[0];
     let filename_ofst = u8_arr_to_u24(&data[0x01..0x04]);
