@@ -2,6 +2,7 @@ use std::path::Path;
 use std::fs;
 use std::io::prelude::*;
 use encoding_rs::{SHIFT_JIS, UTF_8};
+use thiserror::Error;
 
 const DVD_HEADER_SIZE: usize = 0x0440;
 const DVD_MAGIC_NUMBER: u32 = 0xC2339F3D;
@@ -12,6 +13,25 @@ const FILE_ENTRY_SIZE: usize = 0x0C;
 const BANNER_NAME: &str = "opening.bnr";
 const BANNER_SZ: usize = 6_496;
 
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ImageError {
+    #[error("error reading file")]
+    IOError(#[from] std::io::Error),
+    #[error("invalid image file")]
+    InvalidFileType,
+    #[error("invalid region byte: {byte}")]
+    InvalidRegion {
+        byte: u8
+    },
+    #[error("invalid image header ({0})")]
+    InvalidHeader(String),
+    #[error("invalid banner data({0})")]
+    InvalidBanner(String),
+    #[error("{0} was not found in the image")]
+    FileNotFound(String),
+}
+
 #[derive(Copy, Clone)]
 pub enum Region {
     USA,
@@ -21,7 +41,7 @@ pub enum Region {
 }
 
 impl Region {
-    fn from_byte(byte: u8) -> Result<Region, &'static str> {
+    fn from_byte(byte: u8) -> Result<Region, ImageError> {
         match byte {
             b'E' => {
                 Ok(Region::USA)
@@ -36,7 +56,9 @@ impl Region {
                 Ok(Region::FRA)
             },
             _ => {
-                Err("invalid region code")
+                Err(ImageError::InvalidRegion {
+                    byte
+                })
             }
         }
     }
@@ -99,24 +121,24 @@ struct Entry {
 }
 
 impl GCImage {
-    pub fn open(path: &Path) -> Result<GCImage, &'static str> {
-        let metadata = fs::metadata(path).unwrap();
+    pub fn open(path: &Path) -> Result<GCImage, ImageError> {
+        let metadata = fs::metadata(path)?;
         if metadata.len() != DVD_IMAGE_SIZE {
-            return Err("invalid image size");
+            return Err(ImageError::InvalidFileType);
         }
-        let mut file = fs::File::open(path).unwrap();
-        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut file = fs::File::open(path)?;
+        file.seek(std::io::SeekFrom::Start(0))?;
 
         //Read and parse DVD Image header
         let mut data: [u8; DVD_HEADER_SIZE] = [0; DVD_HEADER_SIZE];
-        file.read_exact(&mut data).unwrap();
+        file.read_exact(&mut data)?;
         let header = parse_header(&data);
         validate_header(&header)?;
 
         let region = Region::from_byte(header.game_code[3])?;
 
         //Read and parse banner file. TODO, don't spam list files here. Maybe return an Iterator to each file entry?
-        let root_entry = read_root_entry(&mut file, header.fst_ofst);
+        let root_entry = read_root_entry(&mut file, header.fst_ofst)?;
         list_files(&mut file, header.fst_ofst, &root_entry);
         let banner = read_banner(&mut file, header.fst_ofst, &root_entry, region)?;
         validate_banner(&banner)?;
@@ -129,7 +151,7 @@ impl GCImage {
 }
 
 fn parse_header(data: &[u8]) -> DVDHeader {
-    assert!(data.len() >= DVD_HEADER_SIZE);
+    assert!(data.len() == DVD_HEADER_SIZE);
     let mut game_code = [0; 4];
     game_code.clone_from_slice(&data[0..=0x3]);
     let mut maker_code = [0; 2]; 
@@ -162,16 +184,16 @@ fn parse_header(data: &[u8]) -> DVDHeader {
     }
 }
 
-fn read_banner(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, region: Region) -> Result<Banner, &'static str> {
-    let banner_entry = find_file(file, fst_ofst, root_entry, BANNER_NAME).unwrap();
+fn read_banner(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, region: Region) -> Result<Banner, ImageError> {
+    let banner_entry = find_file(file, fst_ofst, root_entry, BANNER_NAME)?;
     match banner_entry.entry {
         EntryType::File(file_data) => {
             let mut data = [0; BANNER_SZ];
             if file_data.file_length as usize != BANNER_SZ {
-                return Err("malformed banner file")
+                return Err(ImageError::InvalidBanner("malformed banner file".to_string()));
             }
-            file.seek(std::io::SeekFrom::Start(file_data.file_offset as u64)).unwrap();
-            file.read_exact(&mut data).unwrap();
+            file.seek(std::io::SeekFrom::Start(file_data.file_offset as u64))?;
+            file.read_exact(&mut data)?;
 
             let mut magic_word = [0; 0x4];
             magic_word.copy_from_slice(&data[0..0x4]);
@@ -192,32 +214,33 @@ fn read_banner(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, r
                 description
             })
         },
-        _ => {
-            Err("no opening.bnr found")
-        }
+        _ => { Err(ImageError::InvalidBanner("opening.bnr must be a file".to_string())) }
     }
 }
 
-fn read_root_entry(file: &mut fs::File, fst_ofst: u32) -> RootDirectory {
-    file.seek(std::io::SeekFrom::Start(fst_ofst as u64)).unwrap();
+fn read_root_entry(file: &mut fs::File, fst_ofst: u32) -> Result<RootDirectory, ImageError> {
+    file.seek(std::io::SeekFrom::Start(fst_ofst as u64))?;
     let mut data = [0; FILE_ENTRY_SIZE];
-    file.read_exact(&mut data).unwrap();
+    file.read_exact(&mut data)?;
 
     let flags = data[0];
-    assert!(flags == 1); //Root Entry Should always be a directory
+    //Root Entry Should always be a directory
+    if flags != 1 {
+        return Err(ImageError::InvalidHeader("invalid root directory entry".to_string()));
+    }
     let num_entries = u8_arr_to_u32(&data[0x08..0x0C]);
     let string_table_ofst = num_entries * FILE_ENTRY_SIZE as u32;
 
-    RootDirectory {
+    Ok(RootDirectory {
         num_entries,
         string_table_ofst
-    }
+    })
 }
 
-fn read_entry(file: &mut fs::File, ofst: u32) -> Entry {
-    file.seek(std::io::SeekFrom::Start(ofst as u64)).unwrap();
+fn read_entry(file: &mut fs::File, ofst: u32) -> Result<Entry, ImageError> {
+    file.seek(std::io::SeekFrom::Start(ofst as u64))?;
     let mut data = [0; FILE_ENTRY_SIZE];
-    file.read_exact(&mut data).unwrap();
+    file.read_exact(&mut data)?;
 
     let flags = data[0];
     let filename_ofst = u8_arr_to_u24(&data[0x01..0x04]);
@@ -239,16 +262,16 @@ fn read_entry(file: &mut fs::File, ofst: u32) -> Entry {
         })
     };
 
-    Entry {
+    Ok(Entry {
         entry,
         filename_ofst
-    }
+    })
 }
 
 fn list_files(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory) {
     for i in 0..root_entry.num_entries {
         let ofst = ( i * FILE_ENTRY_SIZE as u32 ) + fst_ofst;
-        let entry = read_entry(file, ofst);
+        let entry = read_entry(file, ofst).unwrap();
         let ofst = entry.filename_ofst + root_entry.string_table_ofst + fst_ofst;
         let filename = read_string(file, ofst as u64);
         let offsets = match entry.entry {
@@ -263,22 +286,22 @@ fn list_files(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory) {
     }
 }
 
-fn find_file(img_file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, name: &str) -> Option<Entry> {
+fn find_file(img_file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, name: &str) -> Result<Entry, ImageError> {
     for i in 0..root_entry.num_entries {
         let ofst = ( i * FILE_ENTRY_SIZE as u32 ) + fst_ofst;
-        let entry = read_entry(img_file, ofst);
+        let entry = read_entry(img_file, ofst)?;
         let ofst = entry.filename_ofst + root_entry.string_table_ofst + fst_ofst;
         let filename = read_string(img_file, ofst as u64);
         match entry.entry {
             EntryType::File(_) => {
                 if filename == name {
-                    return Some(entry);
+                    return Ok(entry);
                 }
             }
             _ => {}
         }
     }
-    None
+    Err(ImageError::FileNotFound(name.to_string()))
 }
 
 fn read_string(file: &mut fs::File, ofst: u64) -> String {
@@ -312,28 +335,28 @@ fn byte_slice_to_string(bytes: &[u8], region: Region) -> String {
     }
 }
 
-fn validate_header(hdr: &DVDHeader) -> Result<(), &'static str> {
+fn validate_header(hdr: &DVDHeader) -> Result<(), ImageError> {
     if hdr.magic_word != DVD_MAGIC_NUMBER {
-        return Err("incorrect or missing magic number");
+        return Err(ImageError::InvalidHeader("incorrect or missing magic number".to_string()));
     }
     if (hdr.fst_ofst as u64) >= DVD_IMAGE_SIZE {
-        return Err("malformed filesystem table offset");
+        return Err(ImageError::InvalidHeader("malformed filesystem table offset".to_string()));
     }
     if (hdr.dol_ofst as u64) >= DVD_IMAGE_SIZE {
-        return Err("malformed bootfile offset");
+        return Err(ImageError::InvalidHeader("malformed bootfile offset".to_string()));
     }
     if hdr.game_code[0] != CONSOLE_ID {
-        return Err("incorrect console id");
+        return Err(ImageError::InvalidHeader("incorrect console id".to_string()));
     }
     Ok(())
 }
 
-fn validate_banner(bnr: &Banner) -> Result<(), &'static str> {
+fn validate_banner(bnr: &Banner) -> Result<(), ImageError> {
     if bnr.magic_word[0] != b'B' ||
        bnr.magic_word[1] != b'N' ||
        bnr.magic_word[2] != b'R' ||
        ( bnr.magic_word[3] != b'1' && bnr.magic_word[3] != b'2' ) {
-        Err("invalid banner magic word")
+        Err(ImageError::InvalidBanner("invalid banner magic word".to_string()))
     } else {
         Ok(())
     }
