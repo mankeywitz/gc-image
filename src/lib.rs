@@ -139,7 +139,7 @@ impl GCImage {
 
         //Read and parse banner file. TODO, don't spam list files here. Maybe return an Iterator to each file entry?
         let root_entry = read_root_entry(&mut file, header.fst_ofst)?;
-        list_files(&mut file, header.fst_ofst, &root_entry);
+        //list_files(&mut file, header.fst_ofst, &root_entry);
         let banner = read_banner(&mut file, header.fst_ofst, &root_entry, region)?;
         validate_banner(&banner)?;
         Ok(GCImage {
