@@ -67,7 +67,8 @@ impl Region {
 pub struct GCImage {
     pub header: DVDHeader,
     pub banner: Banner,
-    pub region: Region
+    pub region: Region,
+    file: fs::File
 }
 
 pub struct DVDHeader {
@@ -95,12 +96,12 @@ pub struct Banner {
     pub description: String
 }
 
-struct FileData {
+pub struct FileData {
     file_offset: u32,
     file_length: u32
 }
 
-struct DirData {
+pub struct DirData {
     parent_offset: u32,
     next_offset: u32
 }
@@ -110,14 +111,18 @@ struct RootDirectory {
     string_table_ofst: u32
 }
 
-enum EntryType {
+pub enum EntryType {
     File(FileData),
     Directory(DirData)
 }
 
-struct Entry {
-    filename_ofst: u32,
-    entry: EntryType
+pub struct FilesystemEntry {
+    pub filename: String,
+    pub entry: EntryType
+}
+
+pub struct FilesystemTree {
+    files: Vec<FilesystemEntry>
 }
 
 impl GCImage {
@@ -137,16 +142,38 @@ impl GCImage {
 
         let region = Region::from_byte(header.game_code[3])?;
 
-        //Read and parse banner file. TODO, don't spam list files here. Maybe return an Iterator to each file entry?
         let root_entry = read_root_entry(&mut file, header.fst_ofst)?;
-        //list_files(&mut file, header.fst_ofst, &root_entry);
         let banner = read_banner(&mut file, header.fst_ofst, &root_entry, region)?;
         validate_banner(&banner)?;
         Ok(GCImage {
             header,
             banner,
-            region
+            region,
+            file
         })
+    }
+
+    pub fn files(&mut self) -> Result<FilesystemTree, ImageError> {
+        let root_entry = read_root_entry(&mut self.file, self.header.fst_ofst)?;
+        let str_tbl_ofst = self.header.fst_ofst + root_entry.string_table_ofst;
+        let mut files = Vec::new();
+        for i in 0..root_entry.num_entries {
+            let ofst = (i * FILE_ENTRY_SIZE as u32) + self.header.fst_ofst;
+            let entry = read_entry(&mut self.file, ofst, str_tbl_ofst)?;
+            files.push(entry);
+        }
+        Ok(FilesystemTree {
+            files
+        })
+    }
+}
+
+impl IntoIterator for FilesystemTree {
+    type Item = FilesystemEntry;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.files.into_iter()
     }
 }
 
@@ -237,13 +264,15 @@ fn read_root_entry(file: &mut fs::File, fst_ofst: u32) -> Result<RootDirectory, 
     })
 }
 
-fn read_entry(file: &mut fs::File, ofst: u32) -> Result<Entry, ImageError> {
+fn read_entry(file: &mut fs::File, ofst: u32, string_table_ofst: u32) -> Result<FilesystemEntry, ImageError> {
     file.seek(std::io::SeekFrom::Start(ofst as u64))?;
     let mut data = [0; FILE_ENTRY_SIZE];
     file.read_exact(&mut data)?;
 
     let flags = data[0];
     let filename_ofst = u8_arr_to_u24(&data[0x01..0x04]);
+    let ofst = filename_ofst + string_table_ofst;
+    let filename = read_string(file, ofst as u64);
     let entry = if flags == 0 {
         //File
         let file_offset = u8_arr_to_u32(&data[0x04..0x08]);
@@ -262,39 +291,19 @@ fn read_entry(file: &mut fs::File, ofst: u32) -> Result<Entry, ImageError> {
         })
     };
 
-    Ok(Entry {
+    Ok(FilesystemEntry {
         entry,
-        filename_ofst
+        filename
     })
 }
 
-fn list_files(file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory) {
+fn find_file(img_file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, name: &str) -> Result<FilesystemEntry, ImageError> {
     for i in 0..root_entry.num_entries {
         let ofst = ( i * FILE_ENTRY_SIZE as u32 ) + fst_ofst;
-        let entry = read_entry(file, ofst).unwrap();
-        let ofst = entry.filename_ofst + root_entry.string_table_ofst + fst_ofst;
-        let filename = read_string(file, ofst as u64);
-        let offsets = match entry.entry {
-            EntryType::File(file_data) => {
-                format!("File Offset: {}, File Length: {}", file_data.file_offset, file_data.file_length)
-            },
-            EntryType::Directory(dir_data) => {
-                format!("Parent Offset: {}, Next Offset: {}", dir_data.parent_offset, dir_data.next_offset)
-            }
-        };
-        println!("{:03} - {} - {}", i, filename, offsets);
-    }
-}
-
-fn find_file(img_file: &mut fs::File, fst_ofst: u32, root_entry: &RootDirectory, name: &str) -> Result<Entry, ImageError> {
-    for i in 0..root_entry.num_entries {
-        let ofst = ( i * FILE_ENTRY_SIZE as u32 ) + fst_ofst;
-        let entry = read_entry(img_file, ofst)?;
-        let ofst = entry.filename_ofst + root_entry.string_table_ofst + fst_ofst;
-        let filename = read_string(img_file, ofst as u64);
+        let entry = read_entry(img_file, ofst, root_entry.string_table_ofst + fst_ofst)?;
         match entry.entry {
             EntryType::File(_) => {
-                if filename == name {
+                if entry.filename == name {
                     return Ok(entry);
                 }
             }
